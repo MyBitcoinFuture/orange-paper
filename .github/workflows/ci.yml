@@ -1,0 +1,307 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-markdown:
+    runs-on: [self-hosted, linux]
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Install markdownlint
+      run: npm install -g markdownlint-cli
+      
+    - name: Run markdownlint
+      run: markdownlint "*.md" --ignore node_modules
+      
+    - name: Check for broken internal links
+      run: |
+        # Check for broken internal links in markdown files
+        grep -r "\[.*\](#.*)" *.md | while read line; do
+          link=$(echo "$line" | sed -n 's/.*\[.*\](#\([^)]*\)).*/\1/p')
+          if [[ -n "$link" ]]; then
+            # Check if the link target exists in the document
+            if ! grep -q "^##* $link" THE_ORANGE_PAPER.md; then
+              echo "Warning: Potential broken internal link: $link"
+            fi
+          fi
+        done
+
+  check-mathematical-formulas:
+    runs-on: [self-hosted, linux]
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install dependencies
+      run: |
+        pip install requests beautifulsoup4 lxml
+        
+    - name: Validate LaTeX formulas
+      run: |
+        python3 << 'EOF'
+        import re
+        import sys
+        
+        def validate_latex_formulas(filename):
+            """Validate LaTeX mathematical formulas in markdown file"""
+            with open(filename, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Find all LaTeX formulas (both inline $...$ and display $$...$$)
+            inline_formulas = re.findall(r'\$([^$]+)\$', content)
+            display_formulas = re.findall(r'\$\$([^$]+)\$\$', content)
+            
+            all_formulas = inline_formulas + display_formulas
+            
+            print(f"Found {len(all_formulas)} mathematical formulas")
+            
+            # Basic validation checks
+            errors = []
+            for i, formula in enumerate(all_formulas):
+                # Check for common LaTeX syntax issues
+                if '\\' in formula and not any(cmd in formula for cmd in ['\\mathbb', '\\mathcal', '\\text', '\\times', '\\rightarrow', '\\leq', '\\geq', '\\neq', '\\in', '\\cup', '\\cap', '\\setminus', '\\emptyset', '\\land', '\\lor', '\\neg', '\\Rightarrow', '\\Leftarrow', '\\Leftrightarrow', '\\forall', '\\exists', '\\sum', '\\prod', '\\int', '\\lim', '\\infty', '\\alpha', '\\beta', '\\gamma', '\\delta', '\\epsilon', '\\theta', '\\lambda', '\\mu', '\\pi', '\\sigma', '\\tau', '\\phi', '\\omega', '\\Gamma', '\\Delta', '\\Theta', '\\Lambda', '\\Pi', '\\Sigma', '\\Phi', '\\Omega', '\\begin', '\\end', '\\frac', '\\sqrt', '\\log', '\\sin', '\\cos', '\\tan', '\\exp', '\\ln', '\\max', '\\min', '\\arg', '\\sup', '\\inf']):
+                    errors.append(f"Formula {i+1}: Unknown LaTeX command in '{formula}'")
+                
+                # Check for unmatched braces
+                if formula.count('{') != formula.count('}'):
+                    errors.append(f"Formula {i+1}: Unmatched braces in '{formula}'")
+                
+                # Check for unmatched parentheses
+                if formula.count('(') != formula.count(')'):
+                    errors.append(f"Formula {i+1}: Unmatched parentheses in '{formula}'")
+            
+            if errors:
+                print("LaTeX validation errors found:")
+                for error in errors:
+                    print(f"  - {error}")
+                return False
+            else:
+                print("All LaTeX formulas passed basic validation")
+                return True
+        
+        if not validate_latex_formulas('THE_ORANGE_PAPER.md'):
+            sys.exit(1)
+        EOF
+        
+    - name: Check mathematical notation consistency
+      run: |
+        python3 << 'EOF'
+        import re
+        
+        def check_notation_consistency(filename):
+            """Check for consistent mathematical notation"""
+            with open(filename, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Define expected notation patterns
+            notation_patterns = {
+                'hash_values': r'\\mathbb\{H\}',
+                'byte_strings': r'\\mathbb\{S\}',
+                'natural_numbers': r'\\mathbb\{N\}',
+                'integers': r'\\mathbb\{Z\}',
+                'rational_numbers': r'\\mathbb\{Q\}',
+                'outpoint': r'\\mathcal\{O\}',
+                'transaction': r'\\mathcal\{TX\}',
+                'block': r'\\mathcal\{B\}',
+                'utxo_set': r'\\mathcal\{US\}',
+                'script': r'\\mathcal\{SC\}',
+                'witness': r'\\mathcal\{W\}',
+                'stack': r'\\mathcal\{ST\}'
+            }
+            
+            print("Checking mathematical notation consistency...")
+            
+            for name, pattern in notation_patterns.items():
+                matches = re.findall(pattern, content)
+                if matches:
+                    print(f"  ✓ {name}: Found {len(matches)} instances")
+                else:
+                    print(f"  ⚠ {name}: No instances found")
+        
+        check_notation_consistency('THE_ORANGE_PAPER.md')
+        EOF
+
+  check-external-links:
+    runs-on: [self-hosted, linux]
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        
+    - name: Install link checker
+      run: pip install linkchecker
+      
+    - name: Check external links
+      run: |
+        python3 << 'EOF'
+        import re
+        import requests
+        import time
+        from urllib.parse import urlparse
+        
+        def check_external_links(filename):
+            """Check if external links are accessible"""
+            with open(filename, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Find all external links
+            link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+            links = re.findall(link_pattern, content)
+            
+            external_links = []
+            for text, url in links:
+                if url.startswith('http'):
+                    external_links.append((text, url))
+            
+            print(f"Found {len(external_links)} external links to check")
+            
+            broken_links = []
+            for text, url in links:
+                if url.startswith('http'):
+                    try:
+                        response = requests.head(url, timeout=10, allow_redirects=True)
+                        if response.status_code >= 400:
+                            broken_links.append((text, url, response.status_code))
+                        else:
+                            print(f"  ✓ {url} - {response.status_code}")
+                    except requests.RequestException as e:
+                        broken_links.append((text, url, str(e)))
+                        print(f"  ✗ {url} - {str(e)}")
+                    
+                    # Be respectful to servers
+                    time.sleep(0.5)
+            
+            if broken_links:
+                print("\nBroken external links found:")
+                for text, url, error in broken_links:
+                    print(f"  - {text}: {url} ({error})")
+                return False
+            else:
+                print("\nAll external links are accessible")
+                return True
+        
+        if not check_external_links('THE_ORANGE_PAPER.md'):
+            print("Some external links are broken, but continuing...")
+        EOF
+
+  validate-references:
+    runs-on: [self-hosted, linux]
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Check reference format consistency
+      run: |
+        python3 << 'EOF'
+        import re
+        
+        def validate_references(filename):
+            """Validate reference format and consistency"""
+            with open(filename, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Check for proper reference format
+            reference_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+            references = re.findall(reference_pattern, content)
+            
+            print(f"Found {len(references)} references")
+            
+            # Check for duplicate references
+            urls = [url for _, url in references]
+            duplicates = set([url for url in urls if urls.count(url) > 1])
+            
+            if duplicates:
+                print("Duplicate references found:")
+                for dup in duplicates:
+                    print(f"  - {dup}")
+            else:
+                print("No duplicate references found")
+            
+            # Check for proper academic reference format
+            academic_refs = [text for text, url in references if any(domain in url for domain in ['arxiv.org', 'ieee.org', 'acm.org', 'springer.com', 'elsevier.com'])]
+            if academic_refs:
+                print(f"Found {len(academic_refs)} academic references")
+        
+        validate_references('THE_ORANGE_PAPER.md')
+        EOF
+
+  spell-check:
+    runs-on: [self-hosted, linux]
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install aspell
+      run: |
+        # For self-hosted runners, check if aspell is already installed
+        if ! command -v aspell &> /dev/null; then
+          echo "aspell not found, attempting to install..."
+          if command -v apt-get &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y aspell aspell-en
+          elif command -v yum &> /dev/null; then
+            sudo yum install -y aspell aspell-en
+          elif command -v dnf &> /dev/null; then
+            sudo dnf install -y aspell aspell-en
+          elif command -v pacman &> /dev/null; then
+            sudo pacman -S --noconfirm aspell aspell-en
+          else
+            echo "Package manager not found, skipping aspell installation"
+            exit 0
+          fi
+        else
+          echo "aspell is already installed"
+        fi
+        
+    - name: Run spell check
+      run: |
+        # Create custom dictionary for technical terms
+        cat > technical_dict.txt << 'EOF'
+        Bitcoin
+        Satoshi
+        Nakamoto
+        UTXO
+        SegWit
+        Taproot
+        Merkle
+        secp256k1
+        ECDSA
+        SHA256
+        BIP
+        P2PKH
+        P2SH
+        P2WPKH
+        P2WSH
+        P2TR
+        RBF
+        mempool
+        coinbase
+        halving
+        satoshis
+        opcodes
+        scriptSig
+        scriptPubKey
+        nLockTime
+        nSequence
+        nBits
+        nNonce
+        hashMerkleRoot
+        hashPrevBlock
+        EOF
+        
+        # Run spell check
+        aspell --lang=en --mode=markdown --personal=technical_dict.txt check THE_ORANGE_PAPER.md || true
